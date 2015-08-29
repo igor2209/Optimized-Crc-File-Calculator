@@ -17,6 +17,9 @@ namespace Optimized.Crc.File.Calculator
         [DllImport("Kernel32.dll", SetLastError = true)]
         public static extern bool ReadFile(SafeFileHandle handle, byte[] bytes, int numBytesToRead, out int numBytesRead, IntPtr mustBeZero);
 
+        
+        private static CountdownEvent _countDown = new CountdownEvent(Environment.ProcessorCount);
+
         static void Main(string[] args)
         {
             BufferPool.GetBuffer(10000);
@@ -43,31 +46,43 @@ namespace Optimized.Crc.File.Calculator
 
           
             Console.WriteLine("Running computations...");
-            Console.ReadLine();
+           
+            _countDown.Wait();
+
+            Console.WriteLine("Finished computations");
         }
 
-		private static void SpinDirectoryReader(Queue<ReadDirectoryWork> readDirectoryWork, BlockingCollection<ReadFileWork> readFileWork)
+        private static void SpinDirectoryReader(Queue<ReadDirectoryWork> readDirectoryWork, BlockingCollection<ReadFileWork> readFileWork)
         {
             Task.Factory.StartNew(() =>
             {
-                while (readDirectoryWork.Count > 0)
+                try
                 {
-                    var work = readDirectoryWork.Dequeue();
-                    foreach (var directory in Directory.EnumerateDirectories(work.DirectoryName))
+                    while (readDirectoryWork.Count > 0)
                     {
-                        readDirectoryWork.Enqueue(new ReadDirectoryWork// more work for us!
+                        var work = readDirectoryWork.Dequeue();
+                        foreach (var directory in Directory.EnumerateDirectories(work.DirectoryName))
                         {
-                            DirectoryName = directory
-                        });
-                    }
-                    foreach (var file in Directory.EnumerateFiles(work.DirectoryName, "*.cs"))
-                    {
-                        readFileWork.Add(new ReadFileWork// now we can let someone else handle this work
+                            readDirectoryWork.Enqueue(new ReadDirectoryWork// more work for us!
+                            {
+                                DirectoryName = directory
+                            });
+                        }
+                        foreach (var file in Directory.EnumerateFiles(work.DirectoryName, "*.cs"))
                         {
-                            FileName = file
-                        });
+                            readFileWork.Add(new ReadFileWork// now we can let someone else handle this work
+                            {
+                                FileName = file
+                            });
+                        }
+
                     }
                 }
+                finally
+                {
+                    readFileWork.CompleteAdding();
+                } 
+                
             });
         }
 
@@ -79,9 +94,15 @@ namespace Optimized.Crc.File.Calculator
             {
                 Task.Factory.StartNew(() =>
                 {
-                    while (true)
+                    while (!readFileWork.IsCompleted)
                     {
-                        var work = readFileWork.Take();
+                        ReadFileWork work = null;
+                       
+                        if (!readFileWork.TryTake(out work, 20))
+                        {
+                            continue;
+                        }
+
                         var fileInfo = new FileInfo(work.FileName);
                         // some buffers can be very large, we will use consistent 16KB buffers
 						// and if the file is too large, we will use multiple 16KB buffers.
@@ -124,6 +145,7 @@ namespace Optimized.Crc.File.Calculator
                             FileName = work.FileName
                         });
                     }
+                    _countDown.Signal();
                 });
             }
         }
